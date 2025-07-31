@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+langchain
+qdrant-client
+sqlalchemy
+psycopg2-binary
+openai
+python-dotenv
