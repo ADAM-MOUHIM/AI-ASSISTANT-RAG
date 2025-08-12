@@ -1,155 +1,275 @@
-import { createContext, useContext, useReducer, useCallback } from 'react';
+// src/context/ChatContext.tsx
+import { createContext, useContext, useReducer, useCallback, useEffect } from 'react';
 import type { ReactNode } from 'react';
-import type { ChatState, ChatSession, Message, ChatContextType } from '@/types/chat';
-import { sampleChatSessions } from '@/data/sampleChats';
+import { chatApi } from '@/types/chat';
 
-// Initial state with sample chat sessions
-const initialState: ChatState = {
-  sessions: sampleChatSessions,
-  currentSessionId: 'default',
-  isLoading: false,
-};
+// ===== Frontend types =====
+export interface Message {
+  id: string;
+  content: string;
+  role: 'user' | 'assistant';
+  timestamp: Date;
+}
 
-// Action types
+export interface ChatSession {
+  id: string;
+  title: string;
+  messages: Message[];
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+interface ChatState {
+  sessions: ChatSession[];
+  currentSessionId: string | null;
+  isLoading: boolean;
+  error: string | null;
+}
+
 type ChatAction =
+  | { type: 'LOAD_SESSIONS'; payload: ChatSession[] }
+  | { type: 'LOAD_SESSION_MESSAGES'; payload: { sessionId: string; messages: Message[] } }
   | { type: 'CREATE_CHAT'; payload: ChatSession }
   | { type: 'SELECT_CHAT'; payload: string }
   | { type: 'ADD_MESSAGE'; payload: { sessionId: string; message: Message } }
   | { type: 'DELETE_CHAT'; payload: string }
   | { type: 'UPDATE_TITLE'; payload: { sessionId: string; title: string } }
-  | { type: 'SET_LOADING'; payload: boolean };
+  | { type: 'SET_LOADING'; payload: boolean }
+  | { type: 'SET_ERROR'; payload: string | null };
 
-// Reducer
+interface ChatContextType {
+  state: ChatState;
+  createNewChat: () => Promise<string>;
+  selectChat: (sessionId: string) => Promise<void>;
+  sendMessage: (content: string, sessionId?: string) => Promise<void>;
+  deleteChat: (sessionId: string) => Promise<void>;
+  updateChatTitle: (sessionId: string, title: string) => void;
+  getCurrentSession: () => ChatSession | null;
+  clearError: () => void;
+}
+
+const initialState: ChatState = {
+  sessions: [],
+  currentSessionId: null,
+  isLoading: false,
+  error: null,
+};
+
+// ===== Mappers (assume snake_case from backend) =====
+function convertApiSessionToFrontend(api: any): ChatSession {
+  return {
+    id: String(api.id),
+    title: api.title || 'New Chat',
+    messages: [],
+    createdAt: new Date(api.created_at),
+    updatedAt: new Date(api.updated_at),
+  };
+}
+
+function convertApiMessageToFrontend(api: any): Message {
+  return {
+    id: String(api.id),
+    content: api.content ?? api.text ?? '',
+    role: api.role,
+    timestamp: new Date(api.created_at ?? api.createdAt ?? Date.now()),
+  };
+}
+
+// ===== Reducer =====
 function chatReducer(state: ChatState, action: ChatAction): ChatState {
   switch (action.type) {
+    case 'LOAD_SESSIONS':
+      return {
+        ...state,
+        sessions: action.payload,
+        currentSessionId: state.currentSessionId || action.payload[0]?.id || null,
+        error: null,
+      };
+
+    case 'LOAD_SESSION_MESSAGES': {
+      const { sessionId, messages } = action.payload;
+      return {
+        ...state,
+        sessions: state.sessions.map(s =>
+          s.id === sessionId ? { ...s, messages: [...messages] } : s
+        ),
+      };
+    }
+
     case 'CREATE_CHAT':
       return {
         ...state,
         sessions: [action.payload, ...state.sessions],
         currentSessionId: action.payload.id,
+        error: null,
       };
 
     case 'SELECT_CHAT':
-      return {
-        ...state,
-        currentSessionId: action.payload,
-      };
+      return { ...state, currentSessionId: action.payload, error: null };
 
     case 'ADD_MESSAGE': {
       const { sessionId, message } = action.payload;
       return {
         ...state,
-        sessions: state.sessions.map(session =>
-          session.id === sessionId
-            ? {
-                ...session,
-                messages: [...session.messages, message],
-                updatedAt: new Date(),
-              }
-            : session
+        sessions: state.sessions.map(s =>
+          s.id === sessionId ? { ...s, messages: [...s.messages, message], updatedAt: new Date() } : s
         ),
       };
     }
 
-    case 'DELETE_CHAT': {
-      const newSessions = state.sessions.filter(s => s.id !== action.payload);
-      const newCurrentId = state.currentSessionId === action.payload
-        ? newSessions[0]?.id || null
-        : state.currentSessionId;
-      
+    case 'DELETE_CHAT':
       return {
         ...state,
-        sessions: newSessions,
-        currentSessionId: newCurrentId,
+        sessions: state.sessions.filter(s => s.id !== action.payload),
+        currentSessionId:
+          state.currentSessionId === action.payload ? null : state.currentSessionId,
       };
-    }
 
     case 'UPDATE_TITLE':
       return {
         ...state,
-        sessions: state.sessions.map(session =>
-          session.id === action.payload.sessionId
-            ? { ...session, title: action.payload.title }
-            : session
+        sessions: state.sessions.map(s =>
+          s.id === action.payload.sessionId ? { ...s, title: action.payload.title } : s
         ),
       };
 
     case 'SET_LOADING':
-      return {
-        ...state,
-        isLoading: action.payload,
-      };
+      return { ...state, isLoading: action.payload };
+
+    case 'SET_ERROR':
+      return { ...state, error: action.payload, isLoading: false };
 
     default:
       return state;
   }
 }
 
-// Context
+// ===== Context =====
 const ChatContext = createContext<ChatContextType | null>(null);
 
-// Provider component
+// ===== Provider =====
 export function ChatProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(chatReducer, initialState);
 
-  const createNewChat = useCallback((): string => {
-    const newSession: ChatSession = {
-      id: Date.now().toString(),
-      title: 'New Chat',
-      messages: [],
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    };
-    
-    dispatch({ type: 'CREATE_CHAT', payload: newSession });
-    return newSession.id;
+  const clearError = useCallback(() => {
+    dispatch({ type: 'SET_ERROR', payload: null });
   }, []);
 
-  const selectChat = useCallback((sessionId: string) => {
-    dispatch({ type: 'SELECT_CHAT', payload: sessionId });
+  const loadConversations = useCallback(async () => {
+    try {
+      dispatch({ type: 'SET_LOADING', payload: true });
+      const apiSessions = await chatApi.getConversations();
+      const arr = Array.isArray(apiSessions) ? apiSessions : [];
+      const sessions = arr.map(convertApiSessionToFrontend);
+      dispatch({ type: 'LOAD_SESSIONS', payload: sessions });
+    } catch (error) {
+      console.error('Failed to load conversations:', error);
+      dispatch({ type: 'SET_ERROR', payload: 'Failed to load conversations' });
+    } finally {
+      dispatch({ type: 'SET_LOADING', payload: false });
+    }
   }, []);
+
+  // Only load after auth token exists
+  useEffect(() => {
+    const token =
+      (typeof window !== 'undefined' && localStorage.getItem('access_token')) ||
+      (typeof window !== 'undefined' && sessionStorage.getItem('access_token'));
+    if (!token) return;
+    loadConversations();
+  }, [loadConversations]);
+
+  const loadSessionMessages = useCallback(async (sessionId: string) => {
+    try {
+      const apiResult = await chatApi.getConversation(parseInt(sessionId, 10));
+      const raw = Array.isArray(apiResult) ? apiResult : (apiResult as any)?.messages ?? [];
+      const messages = raw.map(convertApiMessageToFrontend);
+      dispatch({ type: 'LOAD_SESSION_MESSAGES', payload: { sessionId, messages } });
+    } catch (error) {
+      console.error('Failed to load session messages:', error);
+      dispatch({ type: 'SET_ERROR', payload: 'Failed to load messages' });
+      dispatch({ type: 'LOAD_SESSION_MESSAGES', payload: { sessionId, messages: [] } });
+    }
+  }, []);
+
+  const createNewChat = useCallback(async (): Promise<string> => {
+    try {
+      dispatch({ type: 'SET_LOADING', payload: true });
+      const apiSession = await chatApi.createNewConversation();
+      const newSession = convertApiSessionToFrontend(apiSession);
+      dispatch({ type: 'CREATE_CHAT', payload: newSession });
+      return newSession.id;
+    } catch (error) {
+      console.error('Failed to create new chat:', error);
+      dispatch({ type: 'SET_ERROR', payload: 'Failed to create new chat' });
+      throw error;
+    } finally {
+      dispatch({ type: 'SET_LOADING', payload: false });
+    }
+  }, []);
+
+  const selectChat = useCallback(async (sessionId: string) => {
+    dispatch({ type: 'SELECT_CHAT', payload: sessionId });
+    const session = state.sessions.find(s => s.id === sessionId);
+    if (session && session.messages.length === 0) {
+      await loadSessionMessages(sessionId);
+    }
+  }, [state.sessions, loadSessionMessages]);
 
   const sendMessage = useCallback(async (content: string, sessionId?: string) => {
     const targetSessionId = sessionId || state.currentSessionId;
-    if (!targetSessionId) return;
+    if (!targetSessionId) {
+      dispatch({ type: 'SET_ERROR', payload: 'No active session' });
+      return;
+    }
 
-    // Add user message
     const userMessage: Message = {
-      id: Date.now().toString(),
+      id: `temp-${Date.now()}`,
       content,
       role: 'user',
       timestamp: new Date(),
     };
-
     dispatch({ type: 'ADD_MESSAGE', payload: { sessionId: targetSessionId, message: userMessage } });
     dispatch({ type: 'SET_LOADING', payload: true });
 
-    // Update chat title if it's the first message
-    const session = state.sessions.find(s => s.id === targetSessionId);
-    if (session && session.messages.length === 0) {
-      const title = content.slice(0, 50) + (content.length > 50 ? '...' : '');
-      dispatch({ type: 'UPDATE_TITLE', payload: { sessionId: targetSessionId, title } });
-    }
-
-    // Simulate AI response
     try {
-      await new Promise(resolve => setTimeout(resolve, 1500 + Math.random() * 2000));
-      
-      const aiResponse: Message = {
-        id: (Date.now() + 1).toString(),
-        content: generateMockResponse(content),
+      const response: any = await chatApi.sendMessage(content, parseInt(targetSessionId, 10));
+      const aiContent = response?.answer ?? response?.content ?? '';
+      const aiTs = response?.timestamp ?? response?.created_at ?? new Date().toISOString();
+
+      const aiMessage: Message = {
+        id: `ai-${Date.now()}`,
+        content: aiContent,
         role: 'assistant',
-        timestamp: new Date(),
+        timestamp: new Date(aiTs),
       };
 
-      dispatch({ type: 'ADD_MESSAGE', payload: { sessionId: targetSessionId, message: aiResponse } });
+      dispatch({ type: 'ADD_MESSAGE', payload: { sessionId: targetSessionId, message: aiMessage } });
+
+      const session = state.sessions.find(s => s.id === targetSessionId);
+      if (session && session.messages.length <= 2) {
+        const title = content.slice(0, 50) + (content.length > 50 ? '...' : '');
+        dispatch({ type: 'UPDATE_TITLE', payload: { sessionId: targetSessionId, title } });
+      }
+    } catch (error) {
+      console.error('Failed to send message:', error);
+      dispatch({ type: 'SET_ERROR', payload: 'Failed to send message' });
     } finally {
       dispatch({ type: 'SET_LOADING', payload: false });
     }
   }, [state.currentSessionId, state.sessions]);
 
-  const deleteChat = useCallback((sessionId: string) => {
-    dispatch({ type: 'DELETE_CHAT', payload: sessionId });
+  const deleteChat = useCallback(async (sessionId: string) => {
+    try {
+      dispatch({ type: 'SET_LOADING', payload: true });
+      await chatApi.deleteConversation(parseInt(sessionId, 10));
+      dispatch({ type: 'DELETE_CHAT', payload: sessionId });
+    } catch (error) {
+      console.error('Failed to delete chat:', error);
+      dispatch({ type: 'SET_ERROR', payload: 'Failed to delete chat' });
+    } finally {
+      dispatch({ type: 'SET_LOADING', payload: false });
+    }
   }, []);
 
   const updateChatTitle = useCallback((sessionId: string, title: string) => {
@@ -168,47 +288,15 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     deleteChat,
     updateChatTitle,
     getCurrentSession,
+    clearError,
   };
 
-  return (
-    <ChatContext.Provider value={contextValue}>
-      {children}
-    </ChatContext.Provider>
-  );
+  return <ChatContext.Provider value={contextValue}>{children}</ChatContext.Provider>;
 }
 
-// Hook
+// ===== Hook =====
 export function useChat() {
   const context = useContext(ChatContext);
-  if (!context) {
-    throw new Error('useChat must be used within a ChatProvider');
-  }
+  if (!context) throw new Error('useChat must be used within a ChatProvider');
   return context;
 }
-
-// Mock response generator
-function generateMockResponse(userInput: string): string {
-  const responses = [
-    "That's a great question! Let me help you with that. " + 
-    "Based on what you've asked, I'd recommend considering a few different approaches...",
-    
-    "I understand what you're looking for. Here's my take on this:\n\n" +
-    "The key thing to remember is that every situation is unique, and the best solution " +
-    "often depends on your specific requirements and constraints.",
-    
-    "Interesting perspective! I think there are several ways to approach this:\n\n" +
-    "1. **First approach**: This would work well if you need something quick and simple\n" +
-    "2. **Alternative approach**: This might be better for more complex scenarios\n" +
-    "3. **Long-term solution**: Consider this if you're planning for scalability\n\n" +
-    "Which of these resonates most with your current needs?",
-    
-    "Thanks for sharing that with me. I can definitely help you work through this. " +
-    "Let me break this down into manageable steps that should make everything clearer.",
-    
-    "That's a really thoughtful question. In my experience, the best approach here would be to " +
-    "start with the fundamentals and then build up from there. What specific aspect would you " +
-    "like to dive deeper into?"
-  ];
-
-  return responses[Math.floor(Math.random() * responses.length)];
-} 

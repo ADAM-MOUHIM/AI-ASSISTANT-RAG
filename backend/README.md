@@ -10,4 +10,4 @@ pip install -r requirements.txt
 
 Create a `.env` file with your PostgreSQL, Qdrant, and OpenAI credentials.
 
-#uvicorn main:app --reload
+uvicorn main:app --reload
