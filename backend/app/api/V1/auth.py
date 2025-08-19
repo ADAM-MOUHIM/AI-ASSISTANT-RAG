@@ -14,8 +14,6 @@ from app.services.auth_service import (
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
-# NOTE: You don't need a local oauth2_scheme here. auth_service.py already defines one
-# with tokenUrl="/api/v1/auth/login" for Swagger. Keeping another here can confuse things.
 
 # -----------------
 # Register User

@@ -4,15 +4,11 @@ from app.services.auth_service import get_current_user
 from app.db.models.user import User  # adjust import path if different
 
 def _role_name(user: User) -> str:
-    """
-    Extract a simple role name from your User.
-    Works whether role is a plain string or a related object with .name
-    """
     role = getattr(user, "role", None)
     if isinstance(role, str):
         return role
-    # relation object with .name (common)
     return getattr(role, "name", "") or ""
+
 
 def require_roles(*allowed: str):
     """

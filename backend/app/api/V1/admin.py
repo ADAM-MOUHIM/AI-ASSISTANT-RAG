@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException,Form
 from sqlalchemy.orm import Session
 import shutil
 import os
@@ -61,20 +61,50 @@ def create_user(user_data: UserRegister,
 # -----------------
 UPLOAD_FOLDER = "uploaded_docs"
 
+def infer_group(filename: str) -> str | None:
+    n = (filename or "").lower()
+    if n.startswith("invoice_"):                    return "invoice"
+    if "shipping" in n or "order" in n:            return "shipping_order"
+    if "cover" in n or "cv" in n or "resume" in n: return "resume"
+    return None
+
 @router.post("/upload")
 async def upload_document(
     file: UploadFile = File(...),
+    group: str | None = Form(None),               # allow admin to set the group
     db: Session = Depends(get_db),
-    current_admin: User = Depends(require_role("admin"))
+    current_admin: User = Depends(require_role("admin")),
 ):
+    # read the bytes
     content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty file")
+
+    # choose a group tag (explicit form field beats inference)
+    group_tag = group or infer_group(file.filename)
+
+    # process: this stores the DB row AND indexes to Qdrant
     doc = await store_and_process_pdf(
         file_content=content,
         filename=file.filename,
-        user_id=str(current_admin.id),   # if you keep string in schema; else pass int and adjust schema
-        db=db
+        user_id=str(current_admin.id),               # service normalizes DB to int, metadata to str
+        db=db,
+        group_tag=group_tag,                         # <-- IMPORTANT for role→group access
+        content_type=file.content_type or "application/pdf",
+        # collection_name="documents",               # uncomment if you use a custom collection
     )
-    return {"message": "File uploaded successfully", "document_id": doc.id}
+
+    return {
+        "message": "File uploaded and processed",
+        "document": {
+            "id": int(doc.id),
+            "filename": doc.filename,
+            "group_tag": getattr(doc, "group_tag", None),
+            "is_processed": bool(getattr(doc, "is_processed", False)),
+            "chunks_count": int(getattr(doc, "chunks_count", 0) or 0),
+            "status": getattr(doc, "processing_status", None),
+        },
+    }
 
 @router.get("/users", response_model=List[UserOut])
 def list_users(

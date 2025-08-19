@@ -1,19 +1,17 @@
 # backend/scripts/load_pdfs_to_db.py
 import os, io, glob, argparse
+from typing import Optional
 import PyPDF2
 from sqlalchemy.orm import Session
 
-# Ensure ALL models are registered (users, documents, etc.) so FKs resolve
+# Ensure ALL models are registered (users, roles, documents) so FKs resolve
 import app.db.models  # <- IMPORTANT
 from app.db.database import SessionLocal, create_tables, test_connection
 from app.db.models.document import Document
-from app.db.models.user import User  # ORM user model
+from app.db.models.user import User
+from app.db.models.role import Role  # ensure mapper is registered
 from app.services.document_service import store_and_process_pdf  # for --process
 
-import app.db.models             # ensures Base is shared
-from app.db.models.role import Role   # force-register Role
-from app.db.models.user import User   # force-register User
-from app.db.models.document import Document
 
 def read_pdf_bytes(path: str) -> bytes:
     with open(path, "rb") as f:
@@ -22,16 +20,27 @@ def read_pdf_bytes(path: str) -> bytes:
 
 def extract_text_from_pdf(pdf_bytes: bytes) -> str:
     reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
-    text = ""
+    parts = []
     for page in reader.pages:
-        text += (page.extract_text() or "") + "\n"
-    return text.strip()
+        parts.append((page.extract_text() or ""))
+    return "\n".join(parts).strip()
 
 
-def resolve_user_id(db: Session, cli_user: str | None) -> int:
-    """Return a valid user id. If --user is provided, verify it exists; otherwise pick the first user."""
+def infer_group(filename: str) -> Optional[str]:
+    """Very simple filename-based grouping. Adjust to your needs."""
+    name = filename.lower()
+    if name.startswith("invoice_"):
+        return "invoice"
+    if "shipping" in name or "order" in name:
+        return "shipping_order"
+    if "cover" in name or "cv" in name or "resume" in name:
+        return "resume"
+    return None
+
+
+def resolve_user_id(db: Session, cli_user: Optional[str]) -> int:
+    """Return a valid user id. If --user is provided, verify it exists; else pick first user."""
     if cli_user is not None:
-        # accept str or int; cast to int since Document.user_id is Integer
         try:
             uid = int(cli_user)
         except ValueError:
@@ -40,21 +49,26 @@ def resolve_user_id(db: Session, cli_user: str | None) -> int:
         if not user:
             raise RuntimeError(f"No user found with id={uid}. Create one or omit --user to auto-pick.")
         return uid
-
-    # auto-pick first user (e.g., the seeded admin)
+    # auto-pick first user (e.g., seeded admin)
     user = db.query(User).first()
     if not user:
-        raise RuntimeError(
-            "No users found. Start the app once to run seed_admin, or create a user, then rerun."
-        )
+        raise RuntimeError("No users found. Start the app once to run seeding, or create a user, then rerun.")
     return int(user.id)
 
 
-def save_document_row(db: Session, filename: str, pdf_bytes: bytes, text: str, user_id: int) -> int:
+def save_document_row(
+    db: Session,
+    filename: str,
+    pdf_bytes: bytes,
+    text: str,
+    user_id: int,
+    group_tag: Optional[str] = None,  # <-- default so it's not required at call site
+) -> int:
     doc = Document(
         filename=filename,
         original_filename=filename,
         user_id=user_id,
+        group_tag=group_tag,                 # <-- persist group in Postgres
         file_content=pdf_bytes,
         file_size=len(pdf_bytes),
         content_type="application/pdf",
@@ -69,7 +83,7 @@ def save_document_row(db: Session, filename: str, pdf_bytes: bytes, text: str, u
     return doc.id
 
 
-async def ingest_one(path: str, user_id: int, db: Session, process: bool) -> int:
+async def ingest_one(path: str, user_id: int, db: Session, process: bool, forced_group: Optional[str]) -> int:
     """Insert into Postgres; optionally also chunk+embed into Qdrant. Returns Document.id."""
     filename = os.path.basename(path)
     pdf_bytes = read_pdf_bytes(path)
@@ -77,22 +91,26 @@ async def ingest_one(path: str, user_id: int, db: Session, process: bool) -> int
     if not text:
         raise ValueError(f"No text extracted from {filename}")
 
+    group_tag = forced_group or infer_group(filename)
+
     if process:
-        # use your pipeline (stores in Postgres + processes into Qdrant)
+        # Use your pipeline (stores in Postgres + processes into Qdrant)
+        # NOTE: do NOT pass extracted_text here; store_and_process_pdf handles extraction/metadata itself.
         doc = await store_and_process_pdf(
             file_content=pdf_bytes,
             filename=filename,
-            user_id=str(user_id),   # your service uses str in metadata; DB column is int
+            user_id=str(user_id),   # service normalizes and stores as str in metadata
             db=db,
-            extracted_text=text,
+            group_tag=group_tag,    # <-- push group to vectors too
+            # content_type defaults are fine
         )
-        return doc.id
+        return int(doc.id)
 
     # Postgres only
-    return save_document_row(db, filename, pdf_bytes, text, user_id)
+    return save_document_row(db, filename, pdf_bytes, text, user_id, group_tag)
 
 
-async def main(folder: str, pattern: str, cli_user: str | None, process: bool):
+async def main(folder: str, pattern: str, cli_user: Optional[str], process: bool, forced_group: Optional[str]):
     # Ensure DB ready
     if test_connection():
         create_tables()
@@ -111,7 +129,7 @@ async def main(folder: str, pattern: str, cli_user: str | None, process: bool):
         for path in paths:
             name = os.path.basename(path)
             try:
-                doc_id = await ingest_one(path, user_id, db, process)
+                doc_id = await ingest_one(path, user_id, db, process, forced_group)
                 print(f"✅ {name} → Document ID {doc_id}")
             except Exception as e:
                 db.rollback()
@@ -127,5 +145,6 @@ if __name__ == "__main__":
     ap.add_argument("--pattern", default="*.pdf", help="Glob pattern (default: *.pdf)")
     ap.add_argument("--user", help="Attach to this user id (int). If omitted, auto-picks the first user.")
     ap.add_argument("--process", action="store_true", help="Also chunk+embed into Qdrant via store_and_process_pdf")
+    ap.add_argument("--group", help="Force a group_tag for all files (e.g., invoice, shipping_order, resume)")
     args = ap.parse_args()
-    asyncio.run(main(args.path, args.pattern, args.user, args.process))
+    asyncio.run(main(args.path, args.pattern, args.user, args.process, args.group))

@@ -13,7 +13,6 @@ from app.services.llm import get_llm_response
 from app.services.document_service import search_documents_with_access
 
 router = APIRouter(prefix="/chat", tags=["Chat"])
-
 # ==== Schemas ====
 class MessageCreate(BaseModel):
     content: str
@@ -125,56 +124,30 @@ async def post_session_message(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    # Validate session ownership
     s = db.query(ChatSession).get(session_id)
     if not s or s.user_id != str(user.id):
         raise HTTPException(status_code=404, detail="Chat not found")
 
-    # 1) save user message
+    # Save the user's message
     user_msg = ChatMessage(session_id=session_id, role="user", content=payload.content)
     db.add(user_msg)
     db.commit()
     db.refresh(user_msg)
 
-    # 2) build history
+    # Build message history (ascending)
     history = (
         db.query(ChatMessage)
         .filter(ChatMessage.session_id == session_id)
         .order_by(ChatMessage.created_at.asc())
         .all()
     )
-    convo = [{"role": m.role, "content": m.content} for m in history]
+    messages = [{"role": m.role, "content": m.content} for m in history]
 
-    # 3) role-aware RAG: owner OR allowed groups for the user's role
-    role = getattr(user, "role", None)
-    if hasattr(role, "name"):
-        role = role.name
-    role_name = str(role or "user")
+    # Get assistant reply (your service can still do RAG internally)
+    reply_text = await get_llm_response(messages, str(user.id), db=db)
 
-    try:
-        rag = await search_documents_with_access(
-            query=payload.content,
-            user_id=str(user.id),
-            user_role=role_name,
-            limit=5,
-            score_threshold=0.7,  # cosine distance: lower is better
-        )
-    except Exception as e:
-        print("RAG failed:", e)
-        rag = {"results": []}
-
-    # 4) add retrieved context as a system message (non-destructive)
-    ctx_chunks = [r.get("text", "") for r in (rag.get("results") or [])][:3]
-    if ctx_chunks:
-        context_text = "\n\n".join(ctx_chunks).strip()
-        convo = [
-            {"role": "system", "content": f"Use this context from allowed documents:\n{context_text}"},
-            *convo,
-        ]
-
-    # 5) LLM reply (unchanged signature)
-    reply_text = await get_llm_response(convo, str(user.id))
-
-    # 6) persist assistant message
+    # Persist assistant message
     bot_msg = ChatMessage(session_id=session_id, role="assistant", content=reply_text)
     db.add(bot_msg)
     s.updated_at = datetime.utcnow()
@@ -187,4 +160,3 @@ async def post_session_message(
         content=bot_msg.content,
         created_at=bot_msg.created_at,
     )
-

@@ -1,6 +1,5 @@
 import { useState, useCallback } from 'react';
 import { Upload, File as FileIcon, X, CheckCircle, AlertCircle } from 'lucide-react';
-// If you have an AuthContext, use it (adjust path if different)
 import { useAuth } from '@/context/AuthContext';
 
 interface UploadedFile {
@@ -31,16 +30,12 @@ const UPLOAD_URL = `${API_BASE}/api/v1/documents/upload`;
 export function UploadDocs() {
   const [files, setFiles] = useState<UploadedFile[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
-  const [selectedGroup, setSelectedGroup] = useState<string>('invoice');
+  const [selectedGroup, setSelectedGroup] = useState<string>(''); // ⬅️ no default
+  const [errorMsg, setErrorMsg] = useState<string>(''); // ⬅️ single banner error
 
-  // token: from context if available; fallback to localStorage
+  // auth token
   const auth = (() => {
-    try {
-      // @ts-ignore
-      return useAuth?.();
-    } catch {
-      return undefined;
-    }
+    try { return useAuth?.(); } catch { return undefined; }
   })();
   const token =
     (auth && (auth as any).token) ||
@@ -48,30 +43,40 @@ export function UploadDocs() {
     localStorage.getItem('token') ||
     '';
 
+  const blockIfNoGroup = () => {
+    if (!selectedGroup) {
+      setErrorMsg('Please select a group before uploading.');
+      return true;
+    }
+    return false;
+  };
+
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setIsDragOver(false);
+    if (blockIfNoGroup()) return;               // ⬅️ block
     const droppedFiles = Array.from(e.dataTransfer.files);
     handleFiles(droppedFiles);
-  }, []);
+  }, [selectedGroup]);
 
   const handleFileInput = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files) {
-      const selectedFiles = Array.from(e.target.files);
-      handleFiles(selectedFiles);
-      // reset input so same file can be selected again if needed
-      e.currentTarget.value = '';
-    }
-  }, []);
+    if (!e.target.files) return;
+    if (blockIfNoGroup()) { e.currentTarget.value = ''; return; } // ⬅️ block
+    const selectedFiles = Array.from(e.target.files);
+    handleFiles(selectedFiles);
+    e.currentTarget.value = '';
+  }, [selectedGroup]);
 
   const handleFiles = useCallback((fileList: File[]) => {
+    // group is guaranteed here
+    setErrorMsg(''); // clear any banner error
     const newFiles: UploadedFile[] = fileList.map((f) => ({
       id: `${Date.now()}-${Math.random()}`,
       name: f.name,
       size: f.size,
       status: 'uploading',
       progress: 0,
-      groupTag: selectedGroup,
+      groupTag: selectedGroup, // capture selection at time of add
     }));
 
     setFiles((prev) => [...prev, ...newFiles]);
@@ -97,6 +102,11 @@ export function UploadDocs() {
     const form = new FormData();
     form.append('file', file);
     form.append('group_tag', groupTag);
+
+    // dev log: see exactly what is sent (remove later)
+    // for (const [k, v] of form.entries()) {
+    //   console.debug('[upload form]', k, v instanceof File ? v.name : v);
+    // }
 
     const xhr = new XMLHttpRequest();
     xhr.open('POST', UPLOAD_URL, true);
@@ -167,18 +177,17 @@ export function UploadDocs() {
         </p>
       </div>
 
-      {/* Group picker */}
+      {/* group picker */}
       <div className="flex items-center gap-3">
         <label className="text-sm text-gray-700 dark:text-gray-300">Upload to group</label>
         <select
           value={selectedGroup}
-          onChange={(e) => setSelectedGroup(e.target.value)}
+          onChange={(e) => { setSelectedGroup(e.target.value); setErrorMsg(''); }} // clear error when chosen
           className="px-3 py-2 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-sm text-gray-900 dark:text-gray-100"
         >
+          <option value="" disabled>— select a group —</option>
           {ALL_GROUPS.map((g) => (
-            <option key={g} value={g}>
-              {g}
-            </option>
+            <option key={g} value={g}>{g}</option>
           ))}
         </select>
         {!token && (
@@ -188,7 +197,14 @@ export function UploadDocs() {
         )}
       </div>
 
-      {/* Upload Area */}
+      {/* banner error (single) */}
+      {errorMsg && (
+        <div className="text-sm rounded-md border border-red-300 bg-red-50 text-red-700 px-3 py-2">
+          {errorMsg}
+        </div>
+      )}
+
+      {/* upload area */}
       <div
         onDrop={handleDrop}
         onDragOver={(e) => {
@@ -197,12 +213,20 @@ export function UploadDocs() {
         }}
         onDragLeave={() => setIsDragOver(false)}
         className={`relative border-2 border-dashed rounded-lg p-6 transition-colors ${
-          isDragOver
-            ? 'border-blue-400 bg-blue-50 dark:bg-blue-900/20'
-            : 'border-gray-300 dark:border-gray-600 hover:border-gray-400 dark:hover:border-gray-500'
+          !selectedGroup
+            ? 'opacity-60 cursor-not-allowed'
+            : isDragOver
+              ? 'border-blue-400 bg-blue-50 dark:bg-blue-900/20'
+              : 'border-gray-300 dark:border-gray-600 hover:border-gray-400 dark:hover:border-gray-500'
         }`}
       >
-        <div className="text-center">
+        {!selectedGroup && (
+          <div className="absolute inset-0 grid place-items-center pointer-events-none">
+            <span className="text-sm text-gray-500">Select a group to enable uploads</span>
+          </div>
+        )}
+
+        <div className={`${!selectedGroup ? 'pointer-events-none' : ''} text-center`}>
           <Upload className={`mx-auto h-12 w-12 ${isDragOver ? 'text-blue-500' : 'text-gray-400'}`} />
           <div className="mt-4">
             <p className="text-sm text-gray-600 dark:text-gray-400">
@@ -214,21 +238,22 @@ export function UploadDocs() {
               </label>
             </p>
             <p className="text-xs text-gray-500 dark:text-gray-500">
-              PDF, DOC, DOCX, TXT up to 10MB each
+              PDF up to 10MB each
             </p>
           </div>
           <input
             id="file-upload"
             type="file"
             multiple
-            accept=".pdf,.doc,.docx,.txt"
+            accept=".pdf"               // keep in sync with backend
             onChange={handleFileInput}
             className="sr-only"
+            disabled={!selectedGroup}    // ⬅️ block until chosen
           />
         </div>
       </div>
 
-      {/* File List */}
+      {/* file list */}
       {files.length > 0 && (
         <div className="bg-white dark:bg-gray-800 shadow rounded-lg">
           <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
@@ -247,7 +272,7 @@ export function UploadDocs() {
                         {file.name}
                       </p>
                       <p className="text-xs text-gray-500 dark:text-gray-400">
-                        {formatFileSize(file.size)} • group: <span className="font-medium">{file.groupTag}</span>
+                        {formatFileSize(file.size)} • group: <span className="font-medium">{file.groupTag || '—'}</span>
                       </p>
                     </div>
                   </div>
