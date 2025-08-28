@@ -4,15 +4,16 @@ import { Textarea } from '@/components/ui/textarea';
 import { Send } from 'lucide-react';
 
 interface ChatInputProps {
-  onSendMessage: (message: string) => void;
+  // ✅ Now supports optional `stream` flag (keeps compat with single-arg handlers)
+  onSendMessage: (message: string, stream?: boolean) => void;
   disabled?: boolean;
   placeholder?: string;
 }
 
-export function ChatInput({ 
-  onSendMessage, 
-  disabled = false, 
-  placeholder = "Type your message..." 
+export function ChatInput({
+  onSendMessage,
+  disabled = false,
+  placeholder = 'Type your message...',
 }: ChatInputProps) {
   const [input, setInput] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -27,9 +28,9 @@ export function ChatInput({
 
   const handleSend = () => {
     if (input.trim() && !disabled) {
-      onSendMessage(input.trim());
+      // ✅ Ask for streaming by default
+      onSendMessage(input.trim(), true);
       setInput('');
-      // Reset height after sending
       if (textareaRef.current) {
         textareaRef.current.style.height = 'auto';
       }
@@ -43,6 +44,10 @@ export function ChatInput({
     }
   };
 
+  const effectivePlaceholder = disabled
+    ? 'Assistant is responding…'
+    : placeholder;
+
   return (
     <div className="sticky bottom-0 border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80">
       <div className="container max-w-4xl mx-auto p-3 sm:p-4">
@@ -53,13 +58,13 @@ export function ChatInput({
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder={placeholder}
+              placeholder={effectivePlaceholder}
               disabled={disabled}
               className="min-h-[44px] max-h-[120px] sm:max-h-[200px] resize-none text-sm leading-relaxed border-input focus:border-ring transition-colors"
               rows={1}
             />
           </div>
-          
+
           <Button
             onClick={handleSend}
             disabled={disabled || !input.trim()}
@@ -70,11 +75,11 @@ export function ChatInput({
             <span className="sr-only">Send message</span>
           </Button>
         </div>
-        
+
         <div className="text-xs text-muted-foreground mt-2 px-1 hidden sm:block">
           Press Enter to send, Shift+Enter for new line
         </div>
       </div>
     </div>
   );
-} 
+}

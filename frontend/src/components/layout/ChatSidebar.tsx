@@ -30,7 +30,8 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { useAuth } from '@/context/AuthContext';
 
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000/api/v1';
+// IMPORTANT: treat VITE_API_BASE as the FULL API root (already includes /api/v1)
+const API_ROOT = import.meta.env.VITE_API_BASE || 'http://localhost:8000/api/v1';
 
 type Session = {
   id: number;
@@ -50,18 +51,24 @@ export function ChatSidebar({ className }: ChatSidebarProps) {
 
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(false);
-  const [editingId, setEditingId] = useState<number | null>(null);
+  const [, setEditingId] = useState<number | null>(null);
 
   useEffect(() => {
     let alive = true;
     (async () => {
       setLoading(true);
       try {
-        const token = localStorage.getItem('access_token')!;
-        const res = await fetch(`${API_BASE}/chat/sessions`, {
-          headers: { Authorization: `Bearer ${token}` },
+        const token =
+          localStorage.getItem('access_token') || sessionStorage.getItem('access_token');
+        const headers: Record<string, string> = {};
+        if (token) headers.Authorization = `Bearer ${token}`;
+
+        const res = await fetch(`${API_ROOT}/chat/sessions`, {
+          headers,
+          credentials: 'include',
         });
         if (!res.ok) throw new Error(`list sessions: ${res.status}`);
+
         const data: Session[] = await res.json();
         if (alive) setSessions(data);
       } catch (e) {
@@ -77,13 +84,19 @@ export function ChatSidebar({ className }: ChatSidebarProps) {
 
   const handleNewChat = async () => {
     try {
-      const token = localStorage.getItem('access_token')!;
-      const res = await fetch(`${API_BASE}/chat/sessions`, {
+      const token =
+        localStorage.getItem('access_token') || sessionStorage.getItem('access_token');
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers.Authorization = `Bearer ${token}`;
+
+      const res = await fetch(`${API_ROOT}/chat/sessions`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        headers,
+        credentials: 'include',
         body: JSON.stringify({}),
       });
       if (!res.ok) throw new Error(`create session: ${res.status}`);
+
       const created: Session = await res.json();
       setSessions((prev) => [created, ...prev]);
       navigate(`/chats/${created.id}`);
@@ -96,15 +109,20 @@ export function ChatSidebar({ className }: ChatSidebarProps) {
     e.preventDefault();
     e.stopPropagation();
     try {
-      const token = localStorage.getItem('access_token')!;
-      const res = await fetch(`${API_BASE}/chat/sessions/${id}`, {
+      const token =
+        localStorage.getItem('access_token') || sessionStorage.getItem('access_token');
+      const headers: Record<string, string> = {};
+      if (token) headers.Authorization = `Bearer ${token}`;
+
+      const res = await fetch(`${API_ROOT}/chat/sessions/${id}`, {
         method: 'DELETE',
-        headers: { Authorization: `Bearer ${token}` },
+        headers,
+        credentials: 'include',
       });
       if (!res.ok && res.status !== 204) throw new Error(`delete session: ${res.status}`);
+
       setSessions((prev) => prev.filter((s) => s.id !== id));
       if (String(chatId) === String(id)) {
-        // go to first remaining or home
         const next = sessions.find((s) => s.id !== id);
         navigate(next ? `/chats/${next.id}` : '/');
       }
@@ -134,6 +152,8 @@ export function ChatSidebar({ className }: ChatSidebarProps) {
 
   const displayName =
     user?.name || user?.username || (user?.email ? user.email.split('@')[0] : 'User');
+
+  // ✅ Use initials everywhere we show an AvatarFallback
   const initials = displayName
     .split(' ')
     .map((s) => s[0])
@@ -143,6 +163,7 @@ export function ChatSidebar({ className }: ChatSidebarProps) {
 
   const handleNavigation = (path: string) => navigate(path);
 
+  // ✅ Use this in the menu item (no more unused warning)
   const handleSignOut = async () => {
     try {
       await logout();
@@ -153,7 +174,12 @@ export function ChatSidebar({ className }: ChatSidebarProps) {
   };
 
   return (
-    <div className={cn('flex flex-col h-full bg-gradient-to-b from-background to-muted/20 border-r border-border/50', className)}>
+    <div
+      className={cn(
+        'flex flex-col h-full bg-gradient-to-b from-background to-muted/20 border-r border-border/50',
+        className
+      )}
+    >
       {/* Header */}
       <div className="p-4 border-b border-border/50">
         <Button
@@ -169,7 +195,9 @@ export function ChatSidebar({ className }: ChatSidebarProps) {
       {/* Chat List */}
       <ScrollArea className="flex-1">
         <div className="p-3 space-y-2">
-          {loading && <div className="px-3 py-2 text-xs text-muted-foreground">Loading…</div>}
+          {loading && (
+            <div className="px-3 py-2 text-xs text-muted-foreground">Loading…</div>
+          )}
 
           {Object.entries(grouped).map(([dateGroup, list]) => (
             <div key={dateGroup} className="space-y-1">
@@ -180,10 +208,13 @@ export function ChatSidebar({ className }: ChatSidebarProps) {
 
               {list.map((s) => {
                 const active = String(chatId) === String(s.id);
-                const time = new Date(s.updated_at ?? s.created_at).toLocaleTimeString([], {
-                  hour: '2-digit',
-                  minute: '2-digit',
-                });
+                const time = new Date(s.updated_at ?? s.created_at).toLocaleTimeString(
+                  [],
+                  {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  }
+                );
                 return (
                   <div
                     key={s.id}
@@ -192,10 +223,23 @@ export function ChatSidebar({ className }: ChatSidebarProps) {
                       active && 'bg-primary/5 border border-primary/20 shadow-sm'
                     )}
                   >
-                    <Link to={`/chats/${s.id}`} className="flex items-center gap-3 p-3 rounded-xl w-full text-left">
-                      <MessageSquare className={cn('h-4 w-4 shrink-0', active ? 'text-primary' : 'text-muted-foreground')} />
+                    <Link
+                      to={`/chats/${s.id}`}
+                      className="flex items-center gap-3 p-3 rounded-xl w-full text-left"
+                    >
+                      <MessageSquare
+                        className={cn(
+                          'h-4 w-4 shrink-0',
+                          active ? 'text-primary' : 'text-muted-foreground'
+                        )}
+                      />
                       <div className="flex-1 min-w-0">
-                        <div className={cn('text-sm font-medium truncate', active ? 'text-primary' : 'text-foreground')}>
+                        <div
+                          className={cn(
+                            'text-sm font-medium truncate',
+                            active ? 'text-primary' : 'text-foreground'
+                          )}
+                        >
                           {s.title || 'New Chat'}
                         </div>
                         <div className="text-xs text-muted-foreground/70">{time}</div>
@@ -215,7 +259,10 @@ export function ChatSidebar({ className }: ChatSidebarProps) {
                           </Button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end" className="w-48">
-                          <DropdownMenuItem onClick={() => setEditingId(s.id)} className="flex items-center gap-2">
+                          <DropdownMenuItem
+                            onClick={() => setEditingId(s.id)}
+                            className="flex items-center gap-2"
+                          >
                             <Edit3 className="h-4 w-4" />
                             Rename
                           </DropdownMenuItem>
@@ -238,7 +285,9 @@ export function ChatSidebar({ className }: ChatSidebarProps) {
           ))}
 
           {!loading && sessions.length === 0 && (
-            <div className="px-3 py-2 text-xs text-muted-foreground">No conversations yet</div>
+            <div className="px-3 py-2 text-xs text-muted-foreground">
+              No conversations yet
+            </div>
           )}
         </div>
       </ScrollArea>
@@ -247,13 +296,22 @@ export function ChatSidebar({ className }: ChatSidebarProps) {
       <div className="p-4 border-t border-border/50 bg-muted/20">
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" className="w-full justify-start gap-3 h-auto p-3 hover:bg-muted/50 transition-colors">
+            <Button
+              variant="ghost"
+              className="w-full justify-start gap-3 h-auto p-3 hover:bg-muted/50 transition-colors"
+            >
               <Avatar className="h-8 w-8">
-                <AvatarFallback className="bg-primary/10 text-primary font-medium">{initials}</AvatarFallback>
+                <AvatarFallback className="bg-primary/10 text-primary font-medium">
+                  {initials}
+                </AvatarFallback>
               </Avatar>
               <div className="flex-1 min-w-0 text-left">
-                <div className="text-sm font-medium truncate">{displayName}</div>
-                <div className="text-xs text-muted-foreground truncate">{user?.email ?? ''}</div>
+                <div className="text-sm font-medium truncate">
+                  {displayName}
+                </div>
+                <div className="text-xs text-muted-foreground truncate">
+                  {user?.email ?? ''}
+                </div>
               </div>
               <MoreHorizontal className="h-4 w-4 text-muted-foreground" />
             </Button>
@@ -263,44 +321,67 @@ export function ChatSidebar({ className }: ChatSidebarProps) {
             <DropdownMenuLabel>
               <div className="flex items-center gap-3">
                 <Avatar className="h-10 w-10">
-                  <AvatarFallback className="bg-primary/10 text-primary font-medium">{initials}</AvatarFallback>
+                  <AvatarFallback className="bg-primary/10 text-primary font-medium">
+                    {initials}
+                  </AvatarFallback>
                 </Avatar>
                 <div className="flex-1 min-w-0">
                   <div className="font-medium">{displayName}</div>
-                  <div className="text-xs text-muted-foreground truncate">{user?.email ?? ''}</div>
+                  <div className="text-xs text-muted-foreground truncate">
+                    {user?.email ?? ''}
+                  </div>
                 </div>
               </div>
             </DropdownMenuLabel>
 
             <DropdownMenuSeparator />
 
-            <DropdownMenuItem className="flex items-center gap-3 cursor-pointer" onClick={() => handleNavigation('/profile')}>
+            <DropdownMenuItem
+              className="flex items-center gap-3 cursor-pointer"
+              onClick={() => handleNavigation('/profile')}
+            >
               <User className="h-4 w-4" />
               <span>Profile</span>
             </DropdownMenuItem>
-            <DropdownMenuItem className="flex items-center gap-3 cursor-pointer" onClick={() => handleNavigation('/settings')}>
+            <DropdownMenuItem
+              className="flex items-center gap-3 cursor-pointer"
+              onClick={() => handleNavigation('/settings')}
+            >
               <Settings className="h-4 w-4" />
               <span>Settings</span>
             </DropdownMenuItem>
-            <DropdownMenuItem className="flex items-center gap-3 cursor-pointer" onClick={() => handleNavigation('/notifications')}>
+            <DropdownMenuItem
+              className="flex items-center gap-3 cursor-pointer"
+              onClick={() => handleNavigation('/notifications')}
+            >
               <Bell className="h-4 w-4" />
               <span>Notifications</span>
             </DropdownMenuItem>
-            <DropdownMenuItem className="flex items-center gap-3 cursor-pointer" onClick={() => handleNavigation('/appearance')}>
+            <DropdownMenuItem
+              className="flex items-center gap-3 cursor-pointer"
+              onClick={() => handleNavigation('/appearance')}
+            >
               <Moon className="h-4 w-4" />
               <span>Appearance</span>
             </DropdownMenuItem>
 
             <DropdownMenuSeparator />
 
-            <DropdownMenuItem className="flex items-center gap-3 cursor-pointer" onClick={() => handleNavigation('/help')}>
+            <DropdownMenuItem
+              className="flex items-center gap-3 cursor-pointer"
+              onClick={() => handleNavigation('/help')}
+            >
               <HelpCircle className="h-4 w-4" />
               <span>Help & Support</span>
             </DropdownMenuItem>
 
             <DropdownMenuSeparator />
 
-            <DropdownMenuItem className="flex items-center gap-3 text-destructive focus:text-destructive cursor-pointer" onClick={handleSignOut}>
+            {/* ✅ Use the function so it's not "declared and never read" */}
+            <DropdownMenuItem
+              className="flex items-center gap-3 text-destructive focus:text-destructive cursor-pointer"
+              onClick={handleSignOut}
+            >
               <LogOut className="h-4 w-4" />
               <span>Sign out</span>
             </DropdownMenuItem>

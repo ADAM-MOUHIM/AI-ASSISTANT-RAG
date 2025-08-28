@@ -1,12 +1,13 @@
-# app/services/llm.py
+# Fixed streaming implementation for llm.py
 from __future__ import annotations
 
 import os
-from typing import List, Dict, Any
+import asyncio
+from typing import List, Dict, Any, AsyncGenerator
 
 from groq import Groq
 
-# NEW: import your User model to resolve the real role name
+# Import your User model to resolve the real role name
 from app.db.models.user import User
 
 # Heuristics for doc-like queries
@@ -104,30 +105,33 @@ Instructions:
     return prompt
 
 
-async def get_llm_response(conversation_history: List[Dict[str, Any]], current_user: str | int, db=None) -> str:
+# FIXED: Main streaming entry point
+async def get_llm_response_stream(conversation_history: List[Dict[str, Any]], current_user: str | int, db=None) -> AsyncGenerator[str, None]:
     """
-    Main entry: try RAG first with correct role-based access.
-    If nothing is found, fall back to regular LLM.
+    Streaming version of get_llm_response - FIXED VERSION
     """
     try:
-        print(f"🔄 Processing request for user: {current_user}")
+        print(f"Processing streaming request for user: {current_user}")
 
         if not conversation_history:
-            return "Hello! I'm here to help. What would you like to know?"
+            yield "Hello! I'm here to help. What would you like to know?"
+            return
 
         last_question = conversation_history[-1].get("content", "") or ""
-        print(f"📝 Question: {last_question}")
+        print(f"Question: {last_question}")
 
         # Import the secured retry ladder
         try:
             from app.services.document_service import rag_search_retry
         except Exception as e:
-            print(f"⚠️ Could not import rag_search_retry, falling back to basic LLM: {e}")
-            return await get_regular_llm_response(conversation_history, current_user)
+            print(f"Could not import rag_search_retry, falling back to basic LLM: {e}")
+            async for chunk in get_regular_llm_response_stream(conversation_history, current_user):
+                yield chunk
+            return
 
-        # ✅ Resolve the REAL role(s); do NOT default to ['user']
+        # Resolve the REAL role(s); do NOT default to ['user']
         roles = _resolve_roles_from_db(db, current_user)
-        print(f"🛡 Resolved roles for user {current_user}: {roles}")
+        print(f"Resolved roles for user {current_user}: {roles}")
 
         try:
             rag = await rag_search_retry(
@@ -141,22 +145,231 @@ async def get_llm_response(conversation_history: List[Dict[str, Any]], current_u
             )
 
             attempts = rag.get("attempts", [])
-            print(f"🔍 RAG attempts: {attempts}")
+            print(f"RAG attempts: {attempts}")
 
             evidence = rag.get("results", []) or []
             if evidence:
-                print(f"✅ Found {len(evidence)} relevant chunks")
+                print(f"Found {len(evidence)} relevant chunks")
+                async for chunk in get_rag_response_stream(last_question, conversation_history, current_user, {"results": evidence, "total_found": len(evidence)}):
+                    yield chunk
+            else:
+                print("RAG returned no results; using regular LLM fallback")
+                async for chunk in get_regular_llm_response_stream(conversation_history, current_user):
+                    yield chunk
+
+        except Exception as e:
+            print(f"Error during RAG pipeline: {e}")
+            async for chunk in get_regular_llm_response_stream(conversation_history, current_user):
+                yield chunk
+
+    except Exception as e:
+        print(f"Critical error in get_llm_response_stream: {e}")
+        import traceback
+        traceback.print_exc()
+        yield f"I encountered an error: {str(e)}. Please check the logs."
+
+
+# FIXED: Streaming version of get_rag_response
+async def get_rag_response_stream(query: str, history: List[Dict[str, Any]], user_id: str | int, search_result: Dict[str, Any]) -> AsyncGenerator[str, None]:
+    """FIXED streaming version of get_rag_response"""
+    try:
+        evidence: List[Dict[str, Any]] = search_result.get("results", []) or []
+        if not evidence:
+            print("get_rag_response_stream called with empty evidence; falling back to regular LLM")
+            async for chunk in get_regular_llm_response_stream(history, str(user_id)):
+                yield chunk
+            return
+
+        prompt = _build_rag_prompt(
+            user_id=user_id,
+            query=query,
+            history=history,
+            evidence=evidence,
+        )
+
+        # Use actual Groq streaming instead of simulating it
+        client = get_groq_client()
+        model_name = os.getenv("GROQ_MODEL", "llama-3.1-70b-versatile")
+        
+        try:
+            # Create streaming completion
+            stream = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": "You are a knowledgeable assistant that helps users understand their documents."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.2,
+                max_tokens=1000,
+                stream=True,  # Enable streaming
+            )
+            
+            # Stream the actual response
+            for chunk in stream:
+                if chunk.choices[0].delta.content is not None:
+                    content = chunk.choices[0].delta.content
+                    if content:  # Only yield non-empty content
+                        yield content
+                        
+        except Exception as groq_error:
+            print(f"Groq streaming failed: {groq_error}, falling back to non-streaming")
+            # Fallback to non-streaming if Groq streaming fails
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": "You are a knowledgeable assistant that helps users understand their documents."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.2,
+                max_tokens=1000,
+            )
+            
+            # Simulate streaming by chunking the response
+            full_response = response.choices[0].message.content
+            words = full_response.split()
+            current_chunk = ""
+            
+            for i, word in enumerate(words):
+                current_chunk += word + " "
+                
+                # Yield every 3-4 words or at the end
+                if (i + 1) % 4 == 0 or i == len(words) - 1:
+                    yield current_chunk
+                    current_chunk = ""
+                    await asyncio.sleep(0.05)  # Small delay for streaming effect
+
+    except Exception as e:
+        print(f"Error in get_rag_response_stream: {e}")
+        yield "I found some related context in your documents, but I ran into an error while generating the answer. Please try again."
+
+
+# FIXED: Streaming version of get_regular_llm_response
+async def get_regular_llm_response_stream(conversation_history: List[Dict[str, Any]], current_user: str | int) -> AsyncGenerator[str, None]:
+    """FIXED streaming version of get_regular_llm_response"""
+    try:
+        print(f"Using regular LLM streaming for user: {current_user}")
+
+        client = get_groq_client()
+        model_name = os.getenv("GROQ_MODEL", "llama-3.1-70b-versatile")
+
+        recent_history = conversation_history[-5:] if len(conversation_history) > 5 else conversation_history
+        messages: List[Dict[str, str]] = [
+            {"role": "system", "content": f"You are a helpful AI assistant for {current_user}. Be friendly and concise."}
+        ]
+        for msg in recent_history:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if content.strip():
+                messages.append({"role": role, "content": content})
+
+        print(f"Sending {len(messages)} messages to Groq for streaming")
+        
+        try:
+            # Use actual Groq streaming
+            stream = client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                temperature=0.3,
+                max_tokens=800,
+                stream=True,  # Enable streaming
+            )
+            
+            # Stream the actual response
+            for chunk in stream:
+                if chunk.choices[0].delta.content is not None:
+                    content = chunk.choices[0].delta.content
+                    if content:  # Only yield non-empty content
+                        yield content
+                        
+        except Exception as groq_error:
+            print(f"Groq streaming failed: {groq_error}, falling back to non-streaming")
+            # Fallback to non-streaming if Groq streaming fails
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                temperature=0.3,
+                max_tokens=800,
+            )
+            
+            # Simulate streaming by chunking the response
+            full_response = response.choices[0].message.content
+            words = full_response.split()
+            current_chunk = ""
+            
+            for i, word in enumerate(words):
+                current_chunk += word + " "
+                
+                # Yield every 3-4 words or at the end
+                if (i + 1) % 4 == 0 or i == len(words) - 1:
+                    yield current_chunk
+                    current_chunk = ""
+                    await asyncio.sleep(0.05)  # Small delay for streaming effect
+
+    except Exception as e:
+        print(f"Error in get_regular_llm_response_stream: {e}")
+        import traceback
+        traceback.print_exc()
+        last_q = (conversation_history[-1]["content"] if conversation_history else "").lower()
+        if "hello" in last_q or "hi" in last_q:
+            yield f"Hello {current_user}! I'm your AI assistant. How can I help you today?"
+        else:
+            yield "I'm having trouble connecting to the AI service right now. Please try again shortly."
+
+
+# Non-streaming functions remain unchanged
+async def get_llm_response(conversation_history: List[Dict[str, Any]], current_user: str | int, db=None) -> str:
+    """
+    Main entry: try RAG first with correct role-based access.
+    If nothing is found, fall back to regular LLM.
+    """
+    try:
+        print(f"Processing request for user: {current_user}")
+
+        if not conversation_history:
+            return "Hello! I'm here to help. What would you like to know?"
+
+        last_question = conversation_history[-1].get("content", "") or ""
+        print(f"Question: {last_question}")
+
+        # Import the secured retry ladder
+        try:
+            from app.services.document_service import rag_search_retry
+        except Exception as e:
+            print(f"Could not import rag_search_retry, falling back to basic LLM: {e}")
+            return await get_regular_llm_response(conversation_history, current_user)
+
+        # Resolve the REAL role(s); do NOT default to ['user']
+        roles = _resolve_roles_from_db(db, current_user)
+        print(f"Resolved roles for user {current_user}: {roles}")
+
+        try:
+            rag = await rag_search_retry(
+                query=last_question,
+                user_id=current_user,
+                roles=roles,                 # <-- pass actual role(s)
+                db=db,
+                collection_name="documents",
+                min_similarity=0.6,
+                limit=5,
+            )
+
+            attempts = rag.get("attempts", [])
+            print(f"RAG attempts: {attempts}")
+
+            evidence = rag.get("results", []) or []
+            if evidence:
+                print(f"Found {len(evidence)} relevant chunks")
                 return await get_rag_response(last_question, conversation_history, current_user, {"results": evidence, "total_found": len(evidence)})
             else:
-                print("ℹ️ RAG returned no results; using regular LLM fallback")
+                print("RAG returned no results; using regular LLM fallback")
                 return await get_regular_llm_response(conversation_history, current_user)
 
         except Exception as e:
-            print(f"❌ Error during RAG pipeline: {e}")
+            print(f"Error during RAG pipeline: {e}")
             return await get_regular_llm_response(conversation_history, current_user)
 
     except Exception as e:
-        print(f"❌ Critical error in get_llm_response: {e}")
+        print(f"Critical error in get_llm_response: {e}")
         import traceback
         traceback.print_exc()
         return f"I encountered an error: {str(e)}. Please check the logs."
@@ -166,7 +379,7 @@ async def get_rag_response(query: str, history: List[Dict[str, Any]], user_id: s
     try:
         evidence: List[Dict[str, Any]] = search_result.get("results", []) or []
         if not evidence:
-            print("ℹ️ get_rag_response called with empty evidence; falling back to regular LLM")
+            print("get_rag_response called with empty evidence; falling back to regular LLM")
             return await get_regular_llm_response(history, str(user_id))
 
         prompt = _build_rag_prompt(
@@ -190,13 +403,13 @@ async def get_rag_response(query: str, history: List[Dict[str, Any]], user_id: s
         return response.choices[0].message.content
 
     except Exception as e:
-        print(f"❌ Error in get_rag_response: {e}")
+        print(f"Error in get_rag_response: {e}")
         return "I found some related context in your documents, but I ran into an error while generating the answer. Please try again."
 
 
 async def get_regular_llm_response(conversation_history: List[Dict[str, Any]], current_user: str | int) -> str:
     try:
-        print(f"🤖 Using regular LLM for user: {current_user}")
+        print(f"Using regular LLM for user: {current_user}")
 
         client = get_groq_client()
         model_name = os.getenv("GROQ_MODEL", "llama-3.1-70b-versatile")
@@ -211,7 +424,7 @@ async def get_regular_llm_response(conversation_history: List[Dict[str, Any]], c
             if content.strip():
                 messages.append({"role": role, "content": content})
 
-        print(f"🔄 Sending {len(messages)} messages to Groq")
+        print(f"Sending {len(messages)} messages to Groq")
         response = client.chat.completions.create(
             model=model_name,
             messages=messages,
@@ -220,14 +433,13 @@ async def get_regular_llm_response(conversation_history: List[Dict[str, Any]], c
         )
 
         answer = response.choices[0].message.content
-        print(f"✅ Got response from Groq: {len(answer)} characters")
+        print(f"Got response from Groq: {len(answer)} characters")
         return answer
 
     except Exception as e:
-        print(f"❌ Error in get_regular_llm_response: {e}")
+        print(f"Error in get_regular_llm_response: {e}")
         import traceback
         traceback.print_exc()
         last_q = (conversation_history[-1]["content"] if conversation_history else "").lower()
         if "hello" in last_q or "hi" in last_q:
             return f"Hello {current_user}! I'm your AI assistant. How can I help you today?"
-        return "I'm having trouble connecting to the AI service right now. Please try again shortly."
